@@ -1,0 +1,182 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <time.h>
+
+// --- WiFi ---
+const char* ssid     = "UwU";
+const char* password = "12345678";
+
+// --- Google Calendar ---
+const char* apiKey     = "AIzaSyDa42XOjTMknquP6jEohqzVev1HkcYW5fI";
+const char* calendarId = "c_75cfdbedac5660fc90614ee4b59b7119142550b0bc91be5826ab40e7482d6b0c@group.calendar.google.com";  // usually your gmail address
+
+// --- Pins ---
+int ledPin    = 5;
+int buzzerPin = 18;
+int potPin    = 34;
+
+// --- OLED ---
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// --- Timing ---
+unsigned long lastCheck   = 0;
+const unsigned long checkInterval = 60000;  // check every 60 seconds
+
+// --- NTP time sync ---
+void syncTime() {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  Serial.print("Syncing time");
+  while (time(nullptr) < 1000000000) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(" done");
+}
+
+// --- Get current time as ISO8601 string ---
+String getTimeISO() {
+  time_t now = time(nullptr);
+  struct tm* t = gmtime(&now);
+  char buf[25];
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", t);
+  return String(buf);
+}
+
+// --- Show message on OLED ---
+void showOLED(String line1, String line2 = "", String line3 = "") {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);  display.println(line1);
+  display.setCursor(0, 20); display.println(line2);
+  display.setCursor(0, 40); display.println(line3);
+  display.display();
+}
+
+// --- Alert: buzzer + OLED ---
+void triggerAlert(String title) {
+  int potValue  = analogRead(potPin);
+  int dutyCycle = map(potValue, 0, 4095, 0, 255);
+
+  showOLED("!! REMINDER !!", title, "");
+
+  for (int i = 0; i < 5; i++) {
+    ledcWrite(0, dutyCycle);
+    delay(300);
+    ledcWrite(0, 0);
+    delay(200);
+  }
+}
+
+// --- Fetch reminders from Google Calendar ---
+void checkReminders() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  String timeMin = getTimeISO();
+
+  // fetch events starting from now, up to 5
+  String url = "https://www.googleapis.com/calendar/v3/calendars/";
+  url += calendarId;
+  url += "/events?key=";
+  url += apiKey;
+  url += "&timeMin=" + timeMin;
+  url += "&maxResults=5&singleEvents=true&orderBy=startTime";
+
+  HTTPClient http;
+  http.begin(url);
+  int code = http.GET();
+
+  if (code == 200) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(8192);
+    deserializeJson(doc, payload);
+
+    JsonArray items = doc["items"].as<JsonArray>();
+
+    if (items.size() == 0) {
+      showOLED("Rocky", "No reminders", "All clear!");
+      return;
+    }
+
+    // show next upcoming reminder on OLED
+    String title = items[0]["summary"] | "No title";
+    String start = items[0]["start"]["dateTime"] | items[0]["start"]["date"] | "";
+
+    // trim title to fit OLED
+    if (title.length() > 20) title = title.substring(0, 20);
+
+    // check if it's due within the next 5 minutes
+    time_t now = time(nullptr);
+    struct tm eventTime = {};
+    strptime(start.c_str(), "%Y-%m-%dT%H:%M:%S", &eventTime);
+    time_t eventEpoch = mktime(&eventTime);
+    long diff = eventEpoch - now;
+
+    if (diff >= 0 && diff <= 300) {
+      // due within 5 minutes — alert!
+      triggerAlert(title);
+    } else {
+      // just show it on screen
+      showOLED("Next reminder:", title, start.substring(11, 16));  // show HH:MM
+    }
+
+  } else {
+    Serial.print("HTTP error: ");
+    Serial.println(code);
+    showOLED("Calendar error", "Code: " + String(code), "");
+  }
+
+  http.end();
+}
+
+void setup() {
+
+  pinMode(ledPin, OUTPUT);
+  Serial.begin(115200);
+
+  // PWM buzzer
+  ledcSetup(0, 2000, 8);
+  ledcAttachPin(buzzerPin, 0);
+
+  // OLED
+  Wire.begin(21, 22);
+  delay(100);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED init failed");
+    while (true);
+  }
+
+  showOLED("Rocky", "Connecting...", "");
+
+  // WiFi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(" connected");
+  showOLED("Rocky", "WiFi connected");
+  delay(2000);
+
+  // NTP time sync
+  syncTime();
+  showOLED("Rocky", "Ready!", "");
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  if (now - lastCheck >= checkInterval || lastCheck == 0) {
+    lastCheck = now;
+    checkReminders();
+  }
+}
