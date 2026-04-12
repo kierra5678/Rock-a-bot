@@ -8,12 +8,12 @@
 #include <time.h>
 
 // --- WiFi ---
-const char* ssid     = "UwU";
-const char* password = "12345678";
+const char* ssid     = "Kierra's iPhone";
+const char* password = "kierrashotspot";  // remove if open
 
 // --- Google Calendar ---
 const char* apiKey     = "AIzaSyDa42XOjTMknquP6jEohqzVev1HkcYW5fI";
-const char* calendarId = "c_75cfdbedac5660fc90614ee4b59b7119142550b0bc91be5826ab40e7482d6b0c@group.calendar.google.com";  // usually your gmail address
+const char* calendarId = "c_75cfdbedac5660fc90614ee4b59b7119142550b0bc91be5826ab40e7482d6b0c@group.calendar.google.com";
 
 // --- Pins ---
 int ledPin    = 5;
@@ -26,47 +26,196 @@ int potPin    = 34;
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// --- Timing ---
-unsigned long lastCheck   = 0;
-const unsigned long checkInterval = 60000;  // check every 60 seconds
+// --- Rocky phrases ---
+const char* phrases[] = {
+  "Fist my bump!",
+  "Eridians do not\nfear Mondays.",
+  "You are not dead.\nThis is good.",
+  "Problem? Solve it.\nRocky believes.",
+  "Question? Science.\nAlways science.",
+  "You got this,\nhuman friend!",
+  "Ammonia good.\nYou also good.",
+  "Do not give up.\nRocky is here.",
+  "Today: survive.\nTomorrow: thrive.",
+  "Astrophage cannot\nstop you either.",
+  "Grace did it.\nSo can you.",
+  "Many problem.\nMuch solve. Wow.",
+  "You are smart.\nRocky confirm.",
+  "Keep going.\nEridians never quit.",
+  "Small step today.\nBig win tomorrow.",
+  "Rocky proud of\nyou. Very proud.",
+  "Difficult? Yes.\nImpossible? No.",
+  "You figure out.\nYou always do.",
+  "Fist bump for\ncourage today!",
+  "Science your way\nthrough this!"
+};
+const int phraseCount = 20;
 
-// --- NTP time sync ---
+// --- State ---
+int currentPage       = 0;
+unsigned long lastSlide    = 0;
+unsigned long lastCheck    = 0;
+unsigned long lastPhrase   = 0;
+const unsigned long slideInterval = 4000;   // 4 seconds per page
+const unsigned long checkInterval = 60000;  // check calendar every 60s
+const unsigned long phraseInterval = 30000; // new phrase every 30s
+int currentPhrase = 0;
+String nextReminder = "None";
+String reminderTime = "";
+
+// --- NTP ---
 void syncTime() {
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  configTime(-21600, 0, "pool.ntp.org", "time.nist.gov");
   Serial.print("Syncing time");
-  while (time(nullptr) < 1000000000) {
+
+  int attempts = 0;
+  while (time(nullptr) < 1000000000 && attempts < 40) {
     delay(500);
     Serial.print(".");
+    attempts++;
   }
-  Serial.println(" done");
+
+  if (time(nullptr) < 1000000000) {
+    Serial.println(" FAILED - no NTP response");
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Time sync failed");
+    display.println("Check WiFi");
+    display.display();
+    delay(2000);
+  } else {
+    Serial.println(" done");
+  }
 }
 
-// --- Get current time as ISO8601 string ---
-String getTimeISO() {
+
+// --- Slide animation ---
+void slideLeft(void (*drawNewPage)()) {
+  // capture current screen into a buffer then slide out left
+  for (int x = 0; x <= 128; x += 16) {
+    display.clearDisplay();
+    // draw new page offset to the right, sliding in
+    display.startWrite();
+    drawNewPage();
+    display.endWrite();
+    display.display();
+    delay(20);
+  }
+}
+
+// --- Page drawing functions ---
+void drawTimePage() {
   time_t now = time(nullptr);
-  struct tm* t = gmtime(&now);
-  char buf[25];
-  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", t);
-  return String(buf);
-}
+  struct tm* t = localtime(&now);
+  char timeBuf[10];
+  char dateBuf[20];
+  strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", t);
+  strftime(dateBuf, sizeof(dateBuf), "%a %d %b %Y", t);
 
-// --- Show message on OLED ---
-void showOLED(String line1, String line2 = "", String line3 = "") {
   display.clearDisplay();
+
+  // page indicator dots
+  for (int i = 0; i < 3; i++) {
+    if (i == 0) display.fillCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
+    else display.drawCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
+  }
+
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);  display.println(line1);
-  display.setCursor(0, 20); display.println(line2);
-  display.setCursor(0, 40); display.println(line3);
+  display.setCursor(35, 2);
+  display.println("ROCKY TIME");
+
+  // draw divider line
+  display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
+
+  display.setTextSize(2);
+  display.setCursor(10, 20);
+  display.println(timeBuf);
+
+  display.setTextSize(1);
+  display.setCursor(20, 44);
+  display.println(dateBuf);
+
   display.display();
 }
 
-// --- Alert: buzzer + OLED ---
+void drawCalendarPage() {
+  display.clearDisplay();
+
+  // page indicator dots
+  for (int i = 0; i < 3; i++) {
+    if (i == 1) display.fillCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
+    else display.drawCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
+  }
+
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(28, 2);
+  display.println("NEXT REMINDER");
+
+  display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
+
+  if (nextReminder == "None") {
+    display.setCursor(20, 28);
+    display.println("All clear!");
+    display.setCursor(15, 42);
+    display.println("No reminders :)");
+  } else {
+    // word wrap title across two lines
+    String title = nextReminder;
+    if (title.length() > 16) {
+      display.setCursor(0, 18);
+      display.println(title.substring(0, 16));
+      display.setCursor(0, 30);
+      display.println(title.substring(16, 32));
+    } else {
+      display.setCursor(0, 24);
+      display.println(title);
+    }
+
+    display.setCursor(0, 48);
+    display.print("At: ");
+    display.println(reminderTime);
+  }
+
+  display.display();
+}
+
+void drawPhrasePage() {
+  display.clearDisplay();
+
+  // page indicator dots
+  for (int i = 0; i < 3; i++) {
+    if (i == 2) display.fillCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
+    else display.drawCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
+  }
+
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(38, 2);
+  display.println("ROCKY SAYS");
+
+  display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
+
+  display.setCursor(0, 22);
+  display.println(phrases[currentPhrase]);
+
+  display.display();
+}
+
+// --- Alert ---
 void triggerAlert(String title) {
   int potValue  = analogRead(potPin);
   int dutyCycle = map(potValue, 0, 4095, 0, 255);
 
-  showOLED("!! REMINDER !!", title, "");
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(20, 0);
+  display.println("!! REMINDER !!");
+  display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
+  display.setCursor(0, 20);
+  display.println(title);
+  display.display();
 
   for (int i = 0; i < 5; i++) {
     ledcWrite(0, dutyCycle);
@@ -76,18 +225,21 @@ void triggerAlert(String title) {
   }
 }
 
-// --- Fetch reminders from Google Calendar ---
+// --- Fetch calendar ---
 void checkReminders() {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  String timeMin = getTimeISO();
+  time_t now = time(nullptr);
+  struct tm* t = gmtime(&now);
+  char timeBuf[25];
+  strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%SZ", t);
 
-  // fetch events starting from now, up to 5
   String url = "https://www.googleapis.com/calendar/v3/calendars/";
   url += calendarId;
   url += "/events?key=";
   url += apiKey;
-  url += "&timeMin=" + timeMin;
+  url += "&timeMin=";
+  url += timeBuf;
   url += "&maxResults=5&singleEvents=true&orderBy=startTime";
 
   HTTPClient http;
@@ -98,55 +250,35 @@ void checkReminders() {
     String payload = http.getString();
     DynamicJsonDocument doc(8192);
     deserializeJson(doc, payload);
-
     JsonArray items = doc["items"].as<JsonArray>();
 
     if (items.size() == 0) {
-      showOLED("Rocky", "No reminders", "All clear!");
-      return;
-    }
-
-    // show next upcoming reminder on OLED
-    String title = items[0]["summary"] | "No title";
-    String start = items[0]["start"]["dateTime"] | items[0]["start"]["date"] | "";
-
-    // trim title to fit OLED
-    if (title.length() > 20) title = title.substring(0, 20);
-
-    // check if it's due within the next 5 minutes
-    time_t now = time(nullptr);
-    struct tm eventTime = {};
-    strptime(start.c_str(), "%Y-%m-%dT%H:%M:%S", &eventTime);
-    time_t eventEpoch = mktime(&eventTime);
-    long diff = eventEpoch - now;
-
-    if (diff >= 0 && diff <= 300) {
-      // due within 5 minutes — alert!
-      triggerAlert(title);
+      nextReminder = "None";
+      reminderTime = "";
     } else {
-      // just show it on screen
-      showOLED("Next reminder:", title, start.substring(11, 16));  // show HH:MM
+      String title = items[0]["summary"] | "No title";
+      String start = items[0]["start"]["dateTime"] | items[0]["start"]["date"] | "";
+      nextReminder = title;
+      reminderTime = start.length() > 16 ? start.substring(11, 16) : start;
+
+      // alert if due within 5 mins
+      struct tm eventTime = {};
+      strptime(start.c_str(), "%Y-%m-%dT%H:%M:%S", &eventTime);
+      time_t eventEpoch = mktime(&eventTime);
+      long diff = eventEpoch - now;
+      if (diff >= 0 && diff <= 300) triggerAlert(title);
     }
-
-  } else {
-    Serial.print("HTTP error: ");
-    Serial.println(code);
-    showOLED("Calendar error", "Code: " + String(code), "");
   }
-
   http.end();
 }
 
 void setup() {
-
   pinMode(ledPin, OUTPUT);
   Serial.begin(115200);
 
-  // PWM buzzer
   ledcSetup(0, 2000, 8);
   ledcAttachPin(buzzerPin, 0);
 
-  // OLED
   Wire.begin(21, 22);
   delay(100);
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
@@ -154,29 +286,65 @@ void setup() {
     while (true);
   }
 
-  showOLED("Rocky", "Connecting...", "");
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(30, 20);
+  display.println("Rocky waking");
+  display.setCursor(40, 35);
+  display.println("up...");
+  display.display();
 
-  // WiFi
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
+  Serial.print("Connecting");
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
     Serial.print(".");
+    attempts++;
   }
-  Serial.println(" connected");
-  showOLED("Rocky", "WiFi connected");
-  delay(2000);
 
-  // NTP time sync
-  syncTime();
-  showOLED("Rocky", "Ready!", "");
+  if (WiFi.status() == WL_CONNECTED) {
+    syncTime();
+    checkReminders();
+  }
+
+  // pick random starting phrase
+  randomSeed(analogRead(0));
+  currentPhrase = random(phraseCount);
+
+  drawTimePage();
 }
 
 void loop() {
   unsigned long now = millis();
 
+  // slide to next page every 4 seconds
+  if (now - lastSlide >= slideInterval) {
+    lastSlide = now;
+    currentPage = (currentPage + 1) % 3;
+
+    if (currentPage == 0) drawTimePage();
+    else if (currentPage == 1) drawCalendarPage();
+    else if (currentPage == 2) drawPhrasePage();
+  }
+
+  // refresh time page if currently showing
+  if (currentPage == 0 && now % 1000 < 50) {
+    drawTimePage();
+  }
+
+  // check calendar every 60s
   if (now - lastCheck >= checkInterval || lastCheck == 0) {
     lastCheck = now;
     checkReminders();
   }
+
+  // rotate phrase every 30s
+  if (now - lastPhrase >= phraseInterval) {
+    lastPhrase = now;
+    currentPhrase = (currentPhrase + 1) % phraseCount;
+  }
+
+  delay(50);
 }
