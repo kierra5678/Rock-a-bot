@@ -19,6 +19,7 @@ const char* calendarId = "c_75cfdbedac5660fc90614ee4b59b7119142550b0bc91be5826ab
 int ledPin    = 5;
 int buzzerPin = 18;
 int potPin    = 34;
+int buttonPin = 15;
 
 // --- OLED ---
 #define SCREEN_WIDTH 128
@@ -51,59 +52,66 @@ const char* phrases[] = {
 };
 const int phraseCount = 20;
 
-// --- State ---
-int currentPage       = 0;
-unsigned long lastSlide    = 0;
-unsigned long lastCheck    = 0;
-unsigned long lastPhrase   = 0;
-const unsigned long slideInterval = 4000;   // 4 seconds per page
-const unsigned long checkInterval = 60000;  // check calendar every 60s
-const unsigned long phraseInterval = 30000; // new phrase every 30s
+// --- Alarm state ---
+enum AlarmState { IDLE, SETTING_HOUR, SETTING_MINUTE, ALARM_SET, ALARM_FIRING };
+AlarmState alarmState = IDLE;
+int alarmHour   = 0;
+int alarmMinute = 0;
+int pendingHour = 0;
+bool alarmEnabled = false;
+
+// --- Button ---
+bool lastButtonState = HIGH;
+unsigned long lastDebounce = 0;
+const unsigned long debounceDelay = 50;
+
+// --- Slide/page state ---
+int currentPage = 0;                          // 0=time 1=calendar 2=phrase 3=alarm
+unsigned long lastSlide   = 0;
+unsigned long lastCheck   = 0;
+unsigned long lastPhrase  = 0;
+const unsigned long slideInterval  = 4000;
+const unsigned long checkInterval  = 60000;
+const unsigned long phraseInterval = 30000;
 int currentPhrase = 0;
 String nextReminder = "None";
 String reminderTime = "";
 
 // --- NTP ---
 void syncTime() {
-  configTime(-21600, 0, "pool.ntp.org", "time.nist.gov");
+  configTime(-21600, 0, "pool.ntp.org", "time.nist.gov");  // CST Austin
   Serial.print("Syncing time");
-
   int attempts = 0;
   while (time(nullptr) < 1000000000 && attempts < 40) {
     delay(500);
     Serial.print(".");
     attempts++;
   }
+  Serial.println(time(nullptr) < 1000000000 ? " FAILED" : " done");
+}
 
-  if (time(nullptr) < 1000000000) {
-    Serial.println(" FAILED - no NTP response");
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.println("Time sync failed");
-    display.println("Check WiFi");
-    display.display();
-    delay(2000);
-  } else {
-    Serial.println(" done");
+// --- Buzzer alert ---
+void buzzAlert(int times) {
+  int potValue  = analogRead(potPin);
+  int dutyCycle = map(potValue, 0, 4095, 0, 255);
+  for (int i = 0; i < times; i++) {
+    ledcWrite(0, dutyCycle);
+    delay(400);
+    ledcWrite(0, 0);
+    delay(200);
   }
 }
 
-
-// --- Slide animation ---
-void slideLeft(void (*drawNewPage)()) {
-  // capture current screen into a buffer then slide out left
-  for (int x = 0; x <= 128; x += 16) {
-    display.clearDisplay();
-    // draw new page offset to the right, sliding in
-    display.startWrite();
-    drawNewPage();
-    display.endWrite();
-    display.display();
-    delay(20);
+// --- Page dot indicator ---
+void drawDots(int activePage) {
+  for (int i = 0; i < 4; i++) {
+    int x = 52 + i * 8;
+    if (i == activePage) display.fillCircle(x, 62, 2, SSD1306_WHITE);
+    else display.drawCircle(x, 62, 2, SSD1306_WHITE);
   }
 }
 
-// --- Page drawing functions ---
+// --- Page 1: Time ---
 void drawTimePage() {
   time_t now = time(nullptr);
   struct tm* t = localtime(&now);
@@ -113,46 +121,29 @@ void drawTimePage() {
   strftime(dateBuf, sizeof(dateBuf), "%a %d %b %Y", t);
 
   display.clearDisplay();
-
-  // page indicator dots
-  for (int i = 0; i < 3; i++) {
-    if (i == 0) display.fillCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
-    else display.drawCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
-  }
-
+  drawDots(0);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(35, 2);
   display.println("ROCKY TIME");
-
-  // draw divider line
   display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
-
   display.setTextSize(2);
   display.setCursor(10, 20);
   display.println(timeBuf);
-
   display.setTextSize(1);
   display.setCursor(20, 44);
   display.println(dateBuf);
-
   display.display();
 }
 
+// --- Page 2: Calendar ---
 void drawCalendarPage() {
   display.clearDisplay();
-
-  // page indicator dots
-  for (int i = 0; i < 3; i++) {
-    if (i == 1) display.fillCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
-    else display.drawCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
-  }
-
+  drawDots(1);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(28, 2);
   display.println("NEXT REMINDER");
-
   display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
 
   if (nextReminder == "None") {
@@ -161,7 +152,6 @@ void drawCalendarPage() {
     display.setCursor(15, 42);
     display.println("No reminders :)");
   } else {
-    // word wrap title across two lines
     String title = nextReminder;
     if (title.length() > 16) {
       display.setCursor(0, 18);
@@ -172,57 +162,151 @@ void drawCalendarPage() {
       display.setCursor(0, 24);
       display.println(title);
     }
-
     display.setCursor(0, 48);
     display.print("At: ");
     display.println(reminderTime);
   }
-
   display.display();
 }
 
+// --- Page 3: Phrase ---
 void drawPhrasePage() {
   display.clearDisplay();
-
-  // page indicator dots
-  for (int i = 0; i < 3; i++) {
-    if (i == 2) display.fillCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
-    else display.drawCircle(58 + i * 8, 62, 2, SSD1306_WHITE);
-  }
-
+  drawDots(2);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(38, 2);
   display.println("ROCKY SAYS");
-
   display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
-
   display.setCursor(0, 22);
   display.println(phrases[currentPhrase]);
+  display.display();
+}
+
+// --- Page 4: Alarm ---
+void drawAlarmPage() {
+  display.clearDisplay();
+  drawDots(3);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(40, 2);
+  display.println("ALARM");
+  display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
+
+  if (alarmState == SETTING_HOUR) {
+    int potValue = analogRead(potPin);
+    pendingHour  = map(potValue, 0, 4095, 1, 12);
+    display.setCursor(0, 18);
+    display.println("Set hour:");
+    display.setTextSize(2);
+    display.setCursor(45, 32);
+    display.print(pendingHour);
+    display.setTextSize(1);
+    display.setCursor(0, 52);
+    display.println("Press button to set");
+
+  } else if (alarmState == SETTING_MINUTE) {
+    int potValue  = analogRead(potPin);
+    alarmMinute   = map(potValue, 0, 4095, 0, 59);
+    display.setCursor(0, 18);
+    display.println("Set minute:");
+    display.setTextSize(2);
+    display.setCursor(10, 32);
+    char buf[10];
+    sprintf(buf, "%02d:%02d", pendingHour, alarmMinute);
+    display.print(buf);
+    display.setTextSize(1);
+    display.setCursor(0, 52);
+    display.println("Press button to set");
+
+  } else if (alarmState == ALARM_SET) {
+    display.setCursor(20, 18);
+    display.println("Alarm set for:");
+    display.setTextSize(2);
+    display.setCursor(20, 32);
+    char buf[10];
+    sprintf(buf, "%02d:%02d", alarmHour, alarmMinute);
+    display.print(buf);
+    display.setTextSize(1);
+    display.setCursor(10, 52);
+    display.println("Hold to cancel");
+
+  } else if (alarmState == ALARM_FIRING) {
+    display.setTextSize(2);
+    display.setCursor(10, 20);
+    display.println("WAKE UP!");
+    display.setTextSize(1);
+    display.setCursor(5, 45);
+    display.println("Press to dismiss");
+
+  } else {
+    // IDLE — no alarm set
+    display.setCursor(15, 20);
+    display.println("No alarm set.");
+    display.setCursor(0, 36);
+    display.println("Press button to");
+    display.setCursor(0, 46);
+    display.println("set one!");
+  }
 
   display.display();
 }
 
-// --- Alert ---
-void triggerAlert(String title) {
+// --- Button press handler ---
+void handleButton() {
+  if (alarmState == IDLE) {
+    alarmState = SETTING_HOUR;
+    currentPage = 3;          // jump to alarm page
+    lastSlide = millis();
+
+  } else if (alarmState == SETTING_HOUR) {
+    alarmHour  = pendingHour;
+    alarmState = SETTING_MINUTE;
+
+  } else if (alarmState == SETTING_MINUTE) {
+    alarmState   = ALARM_SET;
+    alarmEnabled = true;
+    Serial.printf("Alarm set for %02d:%02d\n", alarmHour, alarmMinute);
+
+  } else if (alarmState == ALARM_FIRING) {
+    // dismiss alarm
+    alarmState   = IDLE;
+    alarmEnabled = false;
+    ledcWrite(0, 0);
+  }
+}
+
+// --- Long press to cancel alarm ---
+void handleLongPress() {
+  if (alarmState == ALARM_SET) {
+    alarmState   = IDLE;
+    alarmEnabled = false;
+    Serial.println("Alarm cancelled");
+  }
+}
+
+// --- Check if alarm should fire ---
+void checkAlarm() {
+  if (!alarmEnabled || alarmState != ALARM_SET) return;
+
+  time_t now = time(nullptr);
+  struct tm* t = localtime(&now);
+
+  if (t->tm_hour == alarmHour && t->tm_min == alarmMinute && t->tm_sec < 5) {
+    alarmState  = ALARM_FIRING;
+    currentPage = 3;
+  }
+}
+
+// --- Fire alarm buzzer ---
+void handleFiringAlarm() {
+  if (alarmState != ALARM_FIRING) return;
   int potValue  = analogRead(potPin);
   int dutyCycle = map(potValue, 0, 4095, 0, 255);
-
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(20, 0);
-  display.println("!! REMINDER !!");
-  display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
-  display.setCursor(0, 20);
-  display.println(title);
-  display.display();
-
-  for (int i = 0; i < 5; i++) {
-    ledcWrite(0, dutyCycle);
-    delay(300);
-    ledcWrite(0, 0);
-    delay(200);
-  }
+  ledcWrite(0, dutyCycle);
+  delay(500);
+  ledcWrite(0, 0);
+  delay(500);
 }
 
 // --- Fetch calendar ---
@@ -261,12 +345,18 @@ void checkReminders() {
       nextReminder = title;
       reminderTime = start.length() > 16 ? start.substring(11, 16) : start;
 
-      // alert if due within 5 mins
       struct tm eventTime = {};
       strptime(start.c_str(), "%Y-%m-%dT%H:%M:%S", &eventTime);
       time_t eventEpoch = mktime(&eventTime);
       long diff = eventEpoch - now;
-      if (diff >= 0 && diff <= 300) triggerAlert(title);
+      if (diff >= 0 && diff <= 300) {
+        display.clearDisplay();
+        display.setCursor(20, 0);  display.println("!! REMINDER !!");
+        display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
+        display.setCursor(0, 20); display.println(title);
+        display.display();
+        buzzAlert(5);
+      }
     }
   }
   http.end();
@@ -274,6 +364,7 @@ void checkReminders() {
 
 void setup() {
   pinMode(ledPin, OUTPUT);
+  pinMode(buttonPin, INPUT_PULLUP);
   Serial.begin(115200);
 
   ledcSetup(0, 2000, 8);
@@ -295,6 +386,9 @@ void setup() {
   display.println("up...");
   display.display();
 
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(100);
   WiFi.begin(ssid, password);
   Serial.print("Connecting");
   int attempts = 0;
@@ -305,34 +399,84 @@ void setup() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    Serial.println(" connected!");
+    delay(1000);
     syncTime();
     checkReminders();
+  } else {
+    Serial.println(" FAILED");
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("WiFi failed");
+    display.println("Running offline");
+    display.display();
+    delay(2000);
   }
 
-  // pick random starting phrase
   randomSeed(analogRead(0));
   currentPhrase = random(phraseCount);
-
   drawTimePage();
 }
 
 void loop() {
   unsigned long now = millis();
 
-  // slide to next page every 4 seconds
+  // --- Button reading with debounce ---
+  bool reading = digitalRead(buttonPin);
+  static unsigned long pressStart = 0;
+  static bool longPressHandled = false;
+
+  if (reading != lastButtonState) {
+    lastDebounce = now;
+  }
+
+  if ((now - lastDebounce) > debounceDelay) {
+    if (reading == LOW && lastButtonState == HIGH) {
+      // button just pressed
+      pressStart = now;
+      longPressHandled = false;
+    }
+    if (reading == LOW && !longPressHandled && (now - pressStart > 1500)) {
+      // long press (1.5s)
+      handleLongPress();
+      longPressHandled = true;
+    }
+    if (reading == HIGH && lastButtonState == LOW && !longPressHandled) {
+      // short press released
+      handleButton();
+    }
+  }
+  lastButtonState = reading;
+
+  // --- Alarm firing ---
+  if (alarmState == ALARM_FIRING) {
+    handleFiringAlarm();
+    drawAlarmPage();
+    return;   // skip sliding while alarm fires
+  }
+
+  // --- Setting alarm — stay on alarm page and update live ---
+  if (alarmState == SETTING_HOUR || alarmState == SETTING_MINUTE) {
+    drawAlarmPage();
+    delay(50);
+    return;   // skip sliding while setting
+  }
+
+  // --- Check alarm trigger ---
+  checkAlarm();
+
+  // --- Slide pages ---
   if (now - lastSlide >= slideInterval) {
     lastSlide = now;
-    currentPage = (currentPage + 1) % 3;
-
-    if (currentPage == 0) drawTimePage();
+    currentPage = (currentPage + 1) % 4;
+    if (currentPage == 0)      drawTimePage();
     else if (currentPage == 1) drawCalendarPage();
     else if (currentPage == 2) drawPhrasePage();
+    else if (currentPage == 3) drawAlarmPage();
   }
 
-  // refresh time page if currently showing
-  if (currentPage == 0 && now % 1000 < 50) {
-    drawTimePage();
-  }
+  // refresh time page every second
+  if (currentPage == 0 && now % 1000 < 50) drawTimePage();
 
   // check calendar every 60s
   if (now - lastCheck >= checkInterval || lastCheck == 0) {
