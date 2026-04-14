@@ -8,12 +8,18 @@
 #include <time.h>
 
 // --- WiFi ---
-const char* ssid     = "uwu";
-const char* password = "12345678";  // remove if open
+const char* ssid = "UwU";
+const char* password = "12345678";
 
 // --- Google Calendar ---
-const char* apiKey     = "-------";
-const char* calendarId = "---------";
+const char* apiKey     = "-----------------";
+const char* calendarId = "-------------";
+
+// --- OpenWeatherMap ---
+String city          = "Austin";
+String weatherApiKey = "-----------------";
+String weatherDesc   = "";
+String weatherTemp   = "";
 
 // --- Pins ---
 int ledPin    = 5;
@@ -55,9 +61,9 @@ const int phraseCount = 20;
 // --- Alarm state ---
 enum AlarmState { IDLE, SETTING_HOUR, SETTING_MINUTE, ALARM_SET, ALARM_FIRING };
 AlarmState alarmState = IDLE;
-int alarmHour   = 0;
-int alarmMinute = 0;
-int pendingHour = 0;
+int alarmHour    = 0;
+int alarmMinute  = 0;
+int pendingHour  = 0;
 bool alarmEnabled = false;
 
 // --- Button ---
@@ -66,13 +72,16 @@ unsigned long lastDebounce = 0;
 const unsigned long debounceDelay = 50;
 
 // --- Slide/page state ---
-int currentPage = 0;                          // 0=time 1=calendar 2=phrase 3=alarm
+// Pages: 0=time, 1=calendar, 2=phrase, 3=alarm, 4=weather
+int currentPage = 0;
 unsigned long lastSlide   = 0;
 unsigned long lastCheck   = 0;
 unsigned long lastPhrase  = 0;
-const unsigned long slideInterval  = 4000;
-const unsigned long checkInterval  = 60000;
-const unsigned long phraseInterval = 30000;
+unsigned long lastWeather = 0;
+const unsigned long slideInterval   = 4000;
+const unsigned long checkInterval   = 60000;
+const unsigned long phraseInterval  = 30000;
+const unsigned long weatherInterval = 600000;  // 10 minutes
 int currentPhrase = 0;
 String nextReminder = "None";
 String reminderTime = "";
@@ -87,7 +96,19 @@ void syncTime() {
     Serial.print(".");
     attempts++;
   }
-  Serial.println(time(nullptr) < 1000000000 ? " FAILED" : " done");
+  if (time(nullptr) < 1000000000) {
+    Serial.println(" FAILED");
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("Time sync failed");
+    display.println("Check WiFi");
+    display.display();
+    delay(2000);
+  } else {
+    Serial.println(" done");
+  }
 }
 
 // --- Buzzer alert ---
@@ -102,16 +123,16 @@ void buzzAlert(int times) {
   }
 }
 
-// --- Page dot indicator ---
+// --- Page dot indicator (5 pages) ---
 void drawDots(int activePage) {
-  for (int i = 0; i < 4; i++) {
-    int x = 52 + i * 8;
+  for (int i = 0; i < 5; i++) {
+    int x = 48 + i * 8;
     if (i == activePage) display.fillCircle(x, 62, 2, SSD1306_WHITE);
     else display.drawCircle(x, 62, 2, SSD1306_WHITE);
   }
 }
 
-// --- Page 1: Time ---
+// --- Page 0: Time ---
 void drawTimePage() {
   time_t now = time(nullptr);
   struct tm* t = localtime(&now);
@@ -136,7 +157,7 @@ void drawTimePage() {
   display.display();
 }
 
-// --- Page 2: Calendar ---
+// --- Page 1: Calendar ---
 void drawCalendarPage() {
   display.clearDisplay();
   drawDots(1);
@@ -169,7 +190,7 @@ void drawCalendarPage() {
   display.display();
 }
 
-// --- Page 3: Phrase ---
+// --- Page 2: Rocky phrase ---
 void drawPhrasePage() {
   display.clearDisplay();
   drawDots(2);
@@ -183,7 +204,7 @@ void drawPhrasePage() {
   display.display();
 }
 
-// --- Page 4: Alarm ---
+// --- Page 3: Alarm ---
 void drawAlarmPage() {
   display.clearDisplay();
   drawDots(3);
@@ -206,8 +227,8 @@ void drawAlarmPage() {
     display.println("Press button to set");
 
   } else if (alarmState == SETTING_MINUTE) {
-    int potValue  = analogRead(potPin);
-    alarmMinute   = map(potValue, 0, 4095, 0, 59);
+    int potValue = analogRead(potPin);
+    alarmMinute  = map(potValue, 0, 4095, 0, 59);
     display.setCursor(0, 18);
     display.println("Set minute:");
     display.setTextSize(2);
@@ -240,7 +261,6 @@ void drawAlarmPage() {
     display.println("Press to dismiss");
 
   } else {
-    // IDLE — no alarm set
     display.setCursor(15, 20);
     display.println("No alarm set.");
     display.setCursor(0, 36);
@@ -248,28 +268,49 @@ void drawAlarmPage() {
     display.setCursor(0, 46);
     display.println("set one!");
   }
-
   display.display();
 }
 
-// --- Button press handler ---
+// --- Page 4: Weather ---
+void drawWeatherPage() {
+  display.clearDisplay();
+  drawDots(4);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(28, 2);
+  display.println("WEATHER");
+  display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
+
+  if (weatherTemp == "") {
+    display.setCursor(10, 28);
+    display.println("Fetching...");
+  } else {
+    display.setTextSize(2);
+    display.setCursor(10, 18);
+    display.println(weatherTemp);
+    display.setTextSize(1);
+    display.setCursor(0, 42);
+    display.println(weatherDesc);
+    display.setCursor(0, 52);
+    display.println(city);
+  }
+  display.display();
+}
+
+// --- Button handler ---
 void handleButton() {
   if (alarmState == IDLE) {
-    alarmState = SETTING_HOUR;
-    currentPage = 3;          // jump to alarm page
-    lastSlide = millis();
-
+    alarmState  = SETTING_HOUR;
+    currentPage = 3;
+    lastSlide   = millis();
   } else if (alarmState == SETTING_HOUR) {
     alarmHour  = pendingHour;
     alarmState = SETTING_MINUTE;
-
   } else if (alarmState == SETTING_MINUTE) {
     alarmState   = ALARM_SET;
     alarmEnabled = true;
     Serial.printf("Alarm set for %02d:%02d\n", alarmHour, alarmMinute);
-
   } else if (alarmState == ALARM_FIRING) {
-    // dismiss alarm
     alarmState   = IDLE;
     alarmEnabled = false;
     ledcWrite(0, 0);
@@ -288,10 +329,8 @@ void handleLongPress() {
 // --- Check if alarm should fire ---
 void checkAlarm() {
   if (!alarmEnabled || alarmState != ALARM_SET) return;
-
   time_t now = time(nullptr);
   struct tm* t = localtime(&now);
-
   if (t->tm_hour == alarmHour && t->tm_min == alarmMinute && t->tm_sec < 5) {
     alarmState  = ALARM_FIRING;
     currentPage = 3;
@@ -309,7 +348,7 @@ void handleFiringAlarm() {
   delay(500);
 }
 
-// --- Fetch calendar ---
+// --- Fetch Google Calendar ---
 void checkReminders() {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -351,9 +390,13 @@ void checkReminders() {
       long diff = eventEpoch - now;
       if (diff >= 0 && diff <= 300) {
         display.clearDisplay();
-        display.setCursor(20, 0);  display.println("!! REMINDER !!");
+        display.setTextSize(1);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(20, 0);
+        display.println("!! REMINDER !!");
         display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
-        display.setCursor(0, 20); display.println(title);
+        display.setCursor(0, 20);
+        display.println(title);
         display.display();
         buzzAlert(5);
       }
@@ -362,6 +405,41 @@ void checkReminders() {
   http.end();
 }
 
+// --- Fetch Weather ---
+void checkWeather() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  String url = "http://api.openweathermap.org/data/2.5/weather?q=";
+  url += city;
+  url += "&appid=";
+  url += weatherApiKey;
+  url += "&units=imperial";
+
+  HTTPClient http;
+  http.begin(url);
+  int code = http.GET();
+
+  if (code == 200) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(2048);
+    deserializeJson(doc, payload);
+
+    float temp    = doc["main"]["temp"];
+    String desc   = doc["weather"][0]["description"];
+    weatherTemp   = String((int)temp) + "F";
+    weatherDesc   = desc;
+    weatherDesc[0] = toupper(weatherDesc[0]);
+    Serial.println("Weather: " + weatherDesc + " " + weatherTemp);
+  } else {
+    Serial.print("Weather error: ");
+    Serial.println(code);
+    weatherTemp = "Error";
+    weatherDesc = "Check API key";
+  }
+  http.end();
+}
+
+// --- Setup ---
 void setup() {
   pinMode(ledPin, OUTPUT);
   pinMode(buttonPin, INPUT_PULLUP);
@@ -380,10 +458,10 @@ void setup() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(30, 20);
-  display.println("Rocky waking");
-  display.setCursor(40, 35);
-  display.println("up...");
+  display.setCursor(20, 20);
+  display.println("Rock-A-Bot");
+  display.setCursor(25, 35);
+  display.println("waking up...");
   display.display();
 
   WiFi.mode(WIFI_STA);
@@ -400,9 +478,15 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println(" connected!");
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("WiFi connected!");
+    display.println(WiFi.localIP().toString());
+    display.display();
     delay(1000);
     syncTime();
     checkReminders();
+    checkWeather();
   } else {
     Serial.println(" FAILED");
     display.clearDisplay();
@@ -418,31 +502,27 @@ void setup() {
   drawTimePage();
 }
 
+// --- Loop ---
 void loop() {
   unsigned long now = millis();
 
   // --- Button reading with debounce ---
   bool reading = digitalRead(buttonPin);
-  static unsigned long pressStart = 0;
-  static bool longPressHandled = false;
+  static unsigned long pressStart   = 0;
+  static bool longPressHandled      = false;
 
-  if (reading != lastButtonState) {
-    lastDebounce = now;
-  }
+  if (reading != lastButtonState) lastDebounce = now;
 
   if ((now - lastDebounce) > debounceDelay) {
     if (reading == LOW && lastButtonState == HIGH) {
-      // button just pressed
-      pressStart = now;
+      pressStart       = now;
       longPressHandled = false;
     }
     if (reading == LOW && !longPressHandled && (now - pressStart > 1500)) {
-      // long press (1.5s)
       handleLongPress();
       longPressHandled = true;
     }
     if (reading == HIGH && lastButtonState == LOW && !longPressHandled) {
-      // short press released
       handleButton();
     }
   }
@@ -452,14 +532,14 @@ void loop() {
   if (alarmState == ALARM_FIRING) {
     handleFiringAlarm();
     drawAlarmPage();
-    return;   // skip sliding while alarm fires
+    return;
   }
 
-  // --- Setting alarm — stay on alarm page and update live ---
+  // --- Setting alarm — stay on alarm page ---
   if (alarmState == SETTING_HOUR || alarmState == SETTING_MINUTE) {
     drawAlarmPage();
     delay(50);
-    return;   // skip sliding while setting
+    return;
   }
 
   // --- Check alarm trigger ---
@@ -468,11 +548,12 @@ void loop() {
   // --- Slide pages ---
   if (now - lastSlide >= slideInterval) {
     lastSlide = now;
-    currentPage = (currentPage + 1) % 4;
-    if (currentPage == 0)      drawTimePage();
+    currentPage = (currentPage + 1) % 5;
+    if      (currentPage == 0) drawTimePage();
     else if (currentPage == 1) drawCalendarPage();
     else if (currentPage == 2) drawPhrasePage();
     else if (currentPage == 3) drawAlarmPage();
+    else if (currentPage == 4) drawWeatherPage();
   }
 
   // refresh time page every second
@@ -482,6 +563,12 @@ void loop() {
   if (now - lastCheck >= checkInterval || lastCheck == 0) {
     lastCheck = now;
     checkReminders();
+  }
+
+  // check weather every 10 minutes
+  if (now - lastWeather >= weatherInterval || lastWeather == 0) {
+    lastWeather = now;
+    checkWeather();
   }
 
   // rotate phrase every 30s
