@@ -8,16 +8,16 @@
 #include <time.h>
 
 // --- WiFi ---
-const char* ssid = "UwU";
-const char* password = "12345678";
+const char* ssid = "---";
+const char* password = "-------";
 
 // --- Google Calendar ---
-const char* apiKey     = "AIzaSyAcwkryeuCUDQBws7pzvew-Jkwui3Kg6sI";
-const char* calendarId = "c_75cfdbedac5660fc90614ee4b59b7119142550b0bc91be5826ab40e7482d6b0c@group.calendar.google.com";
+const char* apiKey     = "------------";
+const char* calendarId = "------------------------";
 
 // --- OpenWeatherMap ---
 String city          = "Austin";
-String weatherApiKey = "3625abc3b8ed7b99ddbc4b0faa35526a";
+String weatherApiKey = "=-------------";
 String weatherDesc   = "";
 String weatherTemp   = "";
 
