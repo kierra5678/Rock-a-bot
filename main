@@ -12,17 +12,16 @@ const char* ssid = "UwU";
 const char* password = "12345678";
 
 // --- Google Calendar ---
-const char* apiKey     = "-----------------";
-const char* calendarId = "-------------";
+const char* apiKey     = "AIzaSyAcwkryeuCUDQBws7pzvew-Jkwui3Kg6sI";
+const char* calendarId = "c_75cfdbedac5660fc90614ee4b59b7119142550b0bc91be5826ab40e7482d6b0c@group.calendar.google.com";
 
 // --- OpenWeatherMap ---
 String city          = "Austin";
-String weatherApiKey = "-----------------";
+String weatherApiKey = "3625abc3b8ed7b99ddbc4b0faa35526a";
 String weatherDesc   = "";
 String weatherTemp   = "";
 
 // --- Pins ---
-int ledPin    = 5;
 int buzzerPin = 18;
 int potPin    = 34;
 int buttonPin = 15;
@@ -57,7 +56,7 @@ const char* phrases[] = {
   "Science your way\nthrough this!"
 };
 const int phraseCount = 20;
-
+bool inAlarmMode = false;
 // --- Alarm state ---
 enum AlarmState { IDLE, SETTING_HOUR, SETTING_MINUTE, ALARM_SET, ALARM_FIRING };
 AlarmState alarmState = IDLE;
@@ -88,7 +87,9 @@ String reminderTime = "";
 
 // --- NTP ---
 void syncTime() {
-  configTime(-21600, 0, "pool.ntp.org", "time.nist.gov");  // CST Austin
+configTime(0, 0, "pool.ntp.org");
+setenv("TZ", "CST6CDT,M3.2.0,M11.1.0", 1);
+tzset();
   Serial.print("Syncing time");
   int attempts = 0;
   while (time(nullptr) < 1000000000 && attempts < 40) {
@@ -216,7 +217,7 @@ void drawAlarmPage() {
 
   if (alarmState == SETTING_HOUR) {
     int potValue = analogRead(potPin);
-    pendingHour  = map(potValue, 0, 4095, 1, 12);
+    pendingHour = map(potValue, 0, 4095, 0, 23);
     display.setCursor(0, 18);
     display.println("Set hour:");
     display.setTextSize(2);
@@ -255,7 +256,7 @@ void drawAlarmPage() {
   } else if (alarmState == ALARM_FIRING) {
     display.setTextSize(2);
     display.setCursor(10, 20);
-    display.println("WAKE UP!");
+    display.println("RING RING");
     display.setTextSize(1);
     display.setCursor(5, 45);
     display.println("Press to dismiss");
@@ -299,22 +300,32 @@ void drawWeatherPage() {
 
 // --- Button handler ---
 void handleButton() {
+  Serial.println("Button pressed - alarmState: " + String(alarmState));
+
+  if (alarmState == ALARM_FIRING) {
+    alarmState = IDLE;
+    alarmEnabled = false;
+    inAlarmMode = false;
+    ledcWrite(0, 0);
+    return;
+  }
+
+  // Enter alarm mode on first press from anywhere
+  inAlarmMode = true;
+  currentPage = 3;
+
   if (alarmState == IDLE) {
-    alarmState  = SETTING_HOUR;
-    currentPage = 3;
-    lastSlide   = millis();
+    alarmState = SETTING_HOUR;
   } else if (alarmState == SETTING_HOUR) {
-    alarmHour  = pendingHour;
+    alarmHour = pendingHour;
     alarmState = SETTING_MINUTE;
   } else if (alarmState == SETTING_MINUTE) {
-    alarmState   = ALARM_SET;
+    alarmState = ALARM_SET;
     alarmEnabled = true;
-    Serial.printf("Alarm set for %02d:%02d\n", alarmHour, alarmMinute);
-  } else if (alarmState == ALARM_FIRING) {
-    alarmState   = IDLE;
-    alarmEnabled = false;
-    ledcWrite(0, 0);
+    inAlarmMode = false;  // return to slideshow after alarm is set
   }
+
+  drawAlarmPage();
 }
 
 // --- Long press to cancel alarm ---
@@ -323,6 +334,7 @@ void handleLongPress() {
     alarmState   = IDLE;
     alarmEnabled = false;
     Serial.println("Alarm cancelled");
+    inAlarmMode  = false;
   }
 }
 
@@ -340,12 +352,21 @@ void checkAlarm() {
 // --- Fire alarm buzzer ---
 void handleFiringAlarm() {
   if (alarmState != ALARM_FIRING) return;
-  int potValue  = analogRead(potPin);
-  int dutyCycle = map(potValue, 0, 4095, 0, 255);
-  ledcWrite(0, dutyCycle);
-  delay(500);
-  ledcWrite(0, 0);
-  delay(500);
+  static unsigned long lastBuzzTime = 0;
+  static bool buzzOn = false;
+  unsigned long now = millis();
+
+  if (now - lastBuzzTime >= 500) {
+    lastBuzzTime = now;
+    buzzOn = !buzzOn;
+    if (buzzOn) {
+      int potValue  = analogRead(potPin);
+      int dutyCycle = map(potValue, 0, 4095, 0, 255);
+      ledcWrite(0, dutyCycle);
+    } else {
+      ledcWrite(0, 0);
+    }
+  }
 }
 
 // --- Fetch Google Calendar ---
@@ -441,7 +462,6 @@ void checkWeather() {
 
 // --- Setup ---
 void setup() {
-  pinMode(ledPin, OUTPUT);
   pinMode(buttonPin, INPUT_PULLUP);
   Serial.begin(115200);
 
@@ -504,31 +524,43 @@ void setup() {
 
 // --- Loop ---
 void loop() {
+Serial.println(digitalRead(buttonPin));
+delay(100);
+
   unsigned long now = millis();
 
-  // --- Button reading with debounce ---
-  bool reading = digitalRead(buttonPin);
-  static unsigned long pressStart   = 0;
-  static bool longPressHandled      = false;
+  // --- Button reading (must be FIRST, before any early returns) ---
+  bool reading = (digitalRead(buttonPin) == LOW);
+  static bool lastReading = false;
+  static bool stablePressed = false;
+  static unsigned long lastDebounceTime2 = 0;
+  static unsigned long pressStart = 0;
+  static bool longPressHandled = false;
 
-  if (reading != lastButtonState) lastDebounce = now;
+  if (reading != lastReading) {
+    lastDebounceTime2 = now;
+  }
+  lastReading = reading;
 
-  if ((now - lastDebounce) > debounceDelay) {
-    if (reading == LOW && lastButtonState == HIGH) {
-      pressStart       = now;
+  if ((now - lastDebounceTime2) > debounceDelay) {
+    if (reading && !stablePressed) {
+      pressStart = now;
       longPressHandled = false;
+      stablePressed = true;
     }
-    if (reading == LOW && !longPressHandled && (now - pressStart > 1500)) {
+    if (!reading && stablePressed) {
+      stablePressed = false;
+      if (!longPressHandled) {
+        handleButton();
+      }
+    }
+    if (stablePressed && !longPressHandled && (now - pressStart > 1500)) {
       handleLongPress();
       longPressHandled = true;
     }
-    if (reading == HIGH && lastButtonState == LOW && !longPressHandled) {
-      handleButton();
-    }
   }
-  lastButtonState = reading;
 
-  // --- Alarm firing ---
+  // --- Alarm firing (AFTER button reading) ---
   if (alarmState == ALARM_FIRING) {
     handleFiringAlarm();
     drawAlarmPage();
@@ -536,19 +568,18 @@ void loop() {
   }
 
   // --- Setting alarm — stay on alarm page ---
-  if (alarmState == SETTING_HOUR || alarmState == SETTING_MINUTE) {
-    drawAlarmPage();
-    delay(50);
-    return;
-  }
+if (inAlarmMode) {
+  drawAlarmPage();
+  return;
+}
 
   // --- Check alarm trigger ---
   checkAlarm();
 
   // --- Slide pages ---
-  if (now - lastSlide >= slideInterval) {
-    lastSlide = now;
-    currentPage = (currentPage + 1) % 5;
+if (!inAlarmMode && now - lastSlide >= slideInterval) {
+  lastSlide = now;
+  currentPage = (currentPage + 1) % 5;
     if      (currentPage == 0) drawTimePage();
     else if (currentPage == 1) drawCalendarPage();
     else if (currentPage == 2) drawPhrasePage();
@@ -576,6 +607,4 @@ void loop() {
     lastPhrase = now;
     currentPhrase = (currentPhrase + 1) % phraseCount;
   }
-
-  delay(50);
 }
